@@ -1,0 +1,70 @@
+name: Sign and publish docker image to GHCR     
+
+on:
+  push:
+    # Use as tag the `version` of the release (e.g. 1.0.0)
+    tags:
+      - '*.*.*'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish_image:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags and labels) for the docker image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Add the `version` of the release and the `gitCommit` hash as labels to the docker image.
+          tags: |
+            type=ref,event=tag,priority=2
+            type=sha,priority=1,prefix=gitCommit:,format=long
+
+      - name: Build and push docker image
+        id: build-and-push
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.8.2
+        with:
+          cosign-release: 'v2.5.0'
+
+      - name: Sign docker image with cosign
+        env:
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        # This step uses the identity token to provision an ephemeral certificate
+        # against the sigstore community Fulcio instance.
+        run: |
+          # The environmental variable `IMAGE_NAME` includes my github user name `DOBEN` which needs to be converted to lowercase.
+          LOWER_CASE_IMAGE_NAME=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+
+          # GitHub interprets the signature artifact (file with `.sig` ending) that is pushed to GHCR as part of this signing step 
+          # confusingly as a docker image. I am still looking for a workaround to prevent the github web UI from proposing to download 
+          # the signature (the last artifact pushed). Instead the web UI should propose to download the actual docker image.
+          # (see https://github.com/DOBEN/signing-docker-images/pkgs/container/signing-docker-images)
+          cosign sign --yes ${{ env.REGISTRY }}/$LOWER_CASE_IMAGE_NAME@${DIGEST}
